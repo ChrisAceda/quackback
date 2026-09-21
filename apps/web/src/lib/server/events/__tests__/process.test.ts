@@ -60,6 +60,9 @@ vi.mock('@/lib/server/db', async (importOriginal) => ({
   sql: vi.fn(),
 }))
 
+const syncProducer = vi.hoisted(() => vi.fn().mockResolvedValue({ id: 'op-1', state: 'uncertain' }))
+vi.mock('@/lib/server/integrations/sync/hooks', () => ({ queueHookSync: syncProducer }))
+
 // --- Helpers ---
 
 function makeEvent(): PostCreatedEvent {
@@ -207,6 +210,27 @@ describe('Event processing', () => {
   })
 
   describe('runHookJob', () => {
+    it.each([true, false])(
+      'rejects integration delivery on the ordinary event queue with integration ID = %s without a remote call',
+      async (hasId) => {
+        const run = vi.fn()
+        mockGetHook.mockReturnValue({ run })
+        const job = makeJob({
+          payload: {
+            hookType: 'slack',
+            event: makeEvent(),
+            target: { channelId: 'channel' },
+            config: hasId ? { integrationId: 'integration_1' } : {},
+          },
+        })
+        await expect(runHookJob(job)).rejects.toThrow(
+          'Integration delivery requires the integration-sync queue'
+        )
+        expect(syncProducer).not.toHaveBeenCalled()
+        expect(run).not.toHaveBeenCalled()
+      }
+    )
+
     it('succeeds silently when hook returns success', async () => {
       const mockHook = { run: vi.fn().mockResolvedValue({ success: true }) }
       mockGetHook.mockReturnValue(mockHook)

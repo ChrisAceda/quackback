@@ -142,7 +142,6 @@ function PostModalContent({
   const [showMergeOthersDialog, setShowMergeOthersDialog] = useState(false)
   const [showDeleteDialog, setShowDeleteDialog] = useState(false)
   const [activeTab, setActiveTab] = useState<'comments' | 'activity'>('comments')
-  const [retryQueuedFor, setRetryQueuedFor] = useState<string | null>(null)
 
   // Duplicate badge indicator — derived from merge suggestions (deduped by React Query with SimilarPostsCard)
   const { data: mergeSuggestionsData } = useQuery(mergeSuggestionQueries.forPost(postId))
@@ -174,8 +173,13 @@ function PostModalContent({
   const retryIntegrations = useMutation({
     mutationFn: () => retryPostIntegrationSyncFn({ data: { id: post.id } }),
     onSuccess: (result) => {
-      setRetryQueuedFor(post.id)
-      toast.success(result.updated ? 'Integration content synced' : 'Integration sync queued')
+      toast.success(
+        result.needsAttention
+          ? 'Some syncs need review. Open Sync history in integration settings.'
+          : result.queued
+            ? 'Integration sync queued'
+            : 'No new sync work to queue'
+      )
     },
     onError: (error) =>
       toast.error(error instanceof Error ? error.message : 'Failed to retry integrations'),
@@ -315,8 +319,7 @@ function PostModalContent({
       canManageIntegrations &&
       !post.deletedAt &&
       post.moderationState === 'published' &&
-      externalLinksQuery.data !== undefined &&
-      retryQueuedFor !== post.id
+      externalLinksQuery.data !== undefined
         ? () => retryIntegrations.mutate()
         : undefined,
     isRetryIntegrationsPending: retryIntegrations.isPending,
@@ -620,6 +623,10 @@ function PostModalContent({
             toast.success('Post deleted')
             // Show warnings for failed cascade operations
             if (result.cascadeResults) {
+              if (result.cascadeResults.some((r) => r.success))
+                toast.message('Archive requests saved', {
+                  description: 'Review and finish them in each integration’s Sync history.',
+                })
               for (const r of result.cascadeResults) {
                 if (!r.success) {
                   toast.warning(`Failed to close ${r.integrationType} issue: ${r.error}`)

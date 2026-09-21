@@ -477,6 +477,9 @@ export {
   slackUserLinks,
   slackThreadSessions,
   integrationDeliveries,
+  integrationSyncOperations,
+  integrationSyncAttempts,
+  integrationSyncActions,
   // Schema tables - RBAC
   roles,
   permissions,

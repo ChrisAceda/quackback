@@ -5,7 +5,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import type { PostCreatedEvent, EventData } from '@/lib/server/events/types'
 import { linearHook } from '@/integrations/linear/server/hook'
-import { updateLinearIssue } from '@/integrations/linear/server/issues'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -55,7 +54,7 @@ describe('linearHook', () => {
   it('skips non post.created events', async () => {
     const event = { type: 'post.status_changed' } as unknown as EventData
     const result = await linearHook.run(event, target, config)
-    expect(result).toEqual({ success: true })
+    expect(result).toEqual({ state: 'succeeded' })
   })
 
   it('returns externalId (UUID) and externalDisplayId (identifier) on success', async () => {
@@ -77,10 +76,11 @@ describe('linearHook', () => {
 
     const result = await linearHook.run(makePostCreatedEvent(), target, config)
 
-    expect(result.success).toBe(true)
-    expect(result.externalId).toBe('uuid-abc-123')
-    expect(result.externalDisplayId).toBe('QUA-42')
-    expect(result.externalUrl).toBe('https://linear.app/quackback/issue/QUA-42/bug-report')
+    expect(result.state).toBe('succeeded')
+    if (result.state !== 'succeeded') throw new Error('Expected successful delivery')
+    expect(result.result?.externalId).toBe('uuid-abc-123')
+    expect(result.result?.externalDisplayId).toBe('QUA-42')
+    expect(result.result?.externalUrl).toBe('https://linear.app/quackback/issue/QUA-42/bug-report')
   })
 
   it('sends correct GraphQL mutation with team ID', async () => {
@@ -110,9 +110,7 @@ describe('linearHook', () => {
 
     const result = await linearHook.run(makePostCreatedEvent(), target, config)
 
-    expect(result.success).toBe(false)
-    expect(result.error).toBe('Team not found')
-    expect(result.shouldRetry).toBe(false)
+    expect(result).toEqual({ state: 'uncertain', errorCode: 'outcome_unknown' })
   })
 
   it('returns failure when no issue is returned', async () => {
@@ -123,8 +121,7 @@ describe('linearHook', () => {
 
     const result = await linearHook.run(makePostCreatedEvent(), target, config)
 
-    expect(result.success).toBe(false)
-    expect(result.error).toBe('No issue returned')
+    expect(result).toEqual({ state: 'uncertain', errorCode: 'outcome_unknown' })
   })
 
   it('returns non-retryable failure on 401', async () => {
@@ -132,9 +129,7 @@ describe('linearHook', () => {
 
     const result = await linearHook.run(makePostCreatedEvent(), target, config)
 
-    expect(result.success).toBe(false)
-    expect(result.error).toContain('Authentication failed')
-    expect(result.shouldRetry).toBe(false)
+    expect(result).toEqual({ state: 'auth_required', errorCode: 'authentication' })
   })
 
   it('returns retryable failure on 429', async () => {
@@ -142,44 +137,6 @@ describe('linearHook', () => {
 
     const result = await linearHook.run(makePostCreatedEvent(), target, config)
 
-    expect(result.success).toBe(false)
-    expect(result.error).toBe('Rate limited')
-    expect(result.shouldRetry).toBe(true)
-  })
-})
-
-describe('updateLinearIssue', () => {
-  it('refreshes an existing issue without creating a duplicate', async () => {
-    const fetchMock = mockFetch(200, {
-      data: { issueUpdate: { success: true, issue: { id: 'uuid-abc-123' } } },
-    })
-    vi.stubGlobal('fetch', fetchMock)
-
-    await updateLinearIssue('lin_test_token', 'uuid-abc-123', {
-      title: 'Updated report',
-      description: '![Screenshot](https://say.any.org/api/storage/portal-media/shot.png)',
-    })
-
-    const body = JSON.parse(fetchMock.mock.calls[0][1].body)
-    expect(body.query).toContain('issueUpdate')
-    expect(body.query).not.toContain('issueCreate')
-    expect(body.variables).toEqual({
-      id: 'uuid-abc-123',
-      input: {
-        title: 'Updated report',
-        description: '![Screenshot](https://say.any.org/api/storage/portal-media/shot.png)',
-      },
-    })
-  })
-
-  it('fails loudly when Linear rejects the refresh', async () => {
-    vi.stubGlobal('fetch', mockFetch(200, { errors: [{ message: 'Issue not found' }] }))
-
-    await expect(
-      updateLinearIssue('lin_test_token', 'missing', {
-        title: 'Report',
-        description: 'Body',
-      })
-    ).rejects.toThrow('Issue not found')
+    expect(result).toEqual({ state: 'retry_wait', errorCode: 'unavailable' })
   })
 })

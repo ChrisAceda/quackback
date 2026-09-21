@@ -1,3 +1,4 @@
+import { integrationFetch } from '@/lib/server/integrations/sync/transport'
 /**
  * Linear issue-tracker capability: issue creation. No `parseRef` on purpose —
  * Linear's inbound webhook identifies issues by internal UUID (`data.id`),
@@ -27,23 +28,12 @@ const CREATE_ISSUE_MUTATION = `
   }
 `
 
-const UPDATE_ISSUE_MUTATION = `
-  mutation UpdateIssue($id: String!, $input: IssueUpdateInput!) {
-    issueUpdate(id: $id, input: $input) {
-      success
-      issue {
-        id
-      }
-    }
-  }
-`
-
 async function linearGraphql(
   accessToken: string,
   query: string,
   variables?: Record<string, unknown>
 ): Promise<{ data?: Record<string, unknown>; errors?: Array<{ message: string }> }> {
-  const response = await fetch(LINEAR_API, {
+  const response = await integrationFetch(LINEAR_API, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${accessToken}`,
@@ -65,28 +55,37 @@ async function linearGraphql(
   }>
 }
 
-/** Refresh the title and full rich description of an already-linked issue. */
-export async function updateLinearIssue(
-  accessToken: string,
-  issueId: string,
-  input: { title: string; description: string }
-): Promise<void> {
-  const result = await linearGraphql(accessToken, UPDATE_ISSUE_MUTATION, {
-    id: issueId,
-    input,
-  })
-
-  if (result.errors?.length) {
-    throw issueError(result.errors[0].message, { retryable: false })
-  }
-  const update = result.data?.issueUpdate as
-    { success?: boolean; issue?: { id: string } } | undefined
-  if (!update?.success || !update.issue) {
-    throw issueError('Linear did not update the issue', { retryable: false })
-  }
-}
-
 export const linearIssues: IssueTrackerCapability = {
+  async inspect({ auth, reference }) {
+    if (!/^(?:[a-zA-Z][a-zA-Z0-9]*-\d+|[a-fA-F0-9-]{36})$/.test(reference))
+      throw new Error('Use the Linear issue identifier or model UUID')
+    const result = await linearGraphql(
+      String(auth.accessToken),
+      'query SyncIssue($id: String!) { issue(id: $id) { id identifier url title description updatedAt team { id } } }',
+      { id: reference }
+    )
+    const issue = result.data?.issue as
+      | {
+          id: string
+          identifier: string
+          url: string
+          title: string
+          description: string | null
+          updatedAt: string
+          team: { id: string }
+        }
+      | undefined
+    if (result.errors?.length || !issue || issue.team.id !== auth.channelId)
+      throw new Error('Issue is unavailable in this destination')
+    return {
+      externalId: issue.id,
+      externalDisplayId: issue.identifier,
+      externalUrl: issue.url,
+      title: issue.title,
+      content: issue.description ?? '',
+      version: issue.updatedAt,
+    }
+  },
   async create({ auth, title, bodyMarkdown }): Promise<ParsedIssueRef> {
     const teamId = auth.channelId as string
     const accessToken = auth.accessToken as string

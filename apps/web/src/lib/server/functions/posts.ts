@@ -521,36 +521,23 @@ export const deletePostFn = createServerFn({ method: 'POST' })
     const auth = await requireAuth({ permission: PERMISSIONS.POST_DELETE })
     const postId = data.id as PostId
 
-    // Soft delete the post (always succeeds or throws; dispatches post.deleted event)
-    await softDeletePost(postId, {
-      principalId: auth.principal.id,
-      role: auth.principal.role,
-      userId: auth.user.id,
-    })
-    log.info({ post_id: data.id }, 'post deleted')
-
-    // Cascade archive/close linked issues (never blocks post delete)
-    let cascadeResults: Array<{
-      linkId: string
-      integrationType: string
-      externalId: string
-      success: boolean
-      error?: string
-    }> = []
-    if (data.cascadeChoices && data.cascadeChoices.length > 0) {
-      try {
-        cascadeResults = await executeCascadeDelete(postId, data.cascadeChoices)
-        const failed = cascadeResults.filter((r) => !r.success)
-        if (failed.length > 0) {
-          log.warn(
-            { post_id: data.id, failed_count: failed.length, failed },
-            'cascade archive(s) failed'
-          )
-        }
-      } catch (err) {
-        log.error({ err }, 'cascade archive error (non-blocking)')
+    let cascadeResults: Awaited<ReturnType<typeof executeCascadeDelete>> = []
+    await softDeletePost(
+      postId,
+      {
+        principalId: auth.principal.id,
+        role: auth.principal.role,
+        userId: auth.user.id,
+      },
+      async (tx) => {
+        if (data.cascadeChoices?.length)
+          cascadeResults = await executeCascadeDelete(postId, data.cascadeChoices, {
+            executor: tx,
+            requestedBy: auth.principal.id,
+          })
       }
-    }
+    )
+    log.info({ post_id: data.id }, 'post deleted')
 
     return { id: data.id, cascadeResults }
   })
@@ -569,39 +556,19 @@ export const fetchPostExternalLinksFn = createServerFn({ method: 'GET' })
   })
 
 /**
- * Sync a published post to its external tracker. A linked Linear issue is
- * refreshed in place (including media); a post with no external links uses the
- * normal post.created queue. Mention notifications are never replayed.
+ * Retry integration delivery per destination and refresh supported linked issues.
+ * Does not republish the domain event or replay notification/AI/webhook sinks.
  */
 export const retryPostIntegrationSyncFn = createServerFn({ method: 'POST' })
   .validator(retryPostIntegrationSyncSchema)
   .handler(async ({ data }) => {
-    await requireAuth({ permission: PERMISSIONS.INTEGRATION_MANAGE })
-    const postId = data.id as PostId
-
-    const post = await db.query.posts.findFirst({
-      where: eq(posts.id, postId),
-      columns: { deletedAt: true, moderationState: true },
-    })
-    if (!post || post.deletedAt) throw new Error('Post not found')
-    if (post.moderationState !== 'published') {
-      throw new Error('Only published posts can be synced')
-    }
-
-    const links = await getPostExternalLinks(postId)
-    if (links.length > 0) {
-      const { refreshLinkedLinearPost } = await import('@/integrations/linear/server/post-sync')
-      const updated = await refreshLinkedLinearPost(postId)
-      if (!updated)
-        throw new Error('This post is linked to an integration that cannot be refreshed')
-      log.info({ post_id: data.id }, 'linked Linear issue refreshed')
-      return { queued: false, updated: true }
-    }
-
-    const { announcePublishedPost } = await import('@/lib/server/domains/posts/post.announce')
-    await announcePublishedPost(postId, undefined, { skipMentions: true })
-    log.info({ post_id: data.id }, 'post integration sync retried')
-    return { queued: true, updated: false }
+    const ctx = await requireAuth({ permission: PERMISSIONS.INTEGRATION_MANAGE })
+    const { syncPostIntegrations } = await import('@/lib/server/integrations/post-sync')
+    const { syncSourceForActor } = await import('@/lib/server/integrations/sync/eligibility')
+    const actor = await policyActorFromAuth(ctx)
+    if (!(await syncSourceForActor({ sourceType: 'post', sourceId: data.id }, actor)))
+      throw new Error('Post not found')
+    return syncPostIntegrations(data.id as PostId, actor.principalId ?? undefined)
   })
 
 /**
