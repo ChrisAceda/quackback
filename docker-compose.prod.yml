@@ -46,6 +46,7 @@ services:
       # MinIO has no public port, so the browser can't reach it directly:
       # serve uploads through the app's /api/storage proxy.
       S3_PROXY: 'true'
+      REDIS_URL: redis://dragonfly:6379
     ports:
       - '${APP_PORT:-3000}:3000'
     depends_on:
@@ -92,6 +93,23 @@ services:
       timeout: 5s
       retries: 5
 
+  dragonfly:
+    image: docker.dragonflydb.io/dragonflydb/dragonfly:v1.27.1
+    container_name: quackback-dragonfly
+    restart: unless-stopped
+    # BullMQ requires cluster_mode=emulated + lock_on_hashtags for Lua script compatibility.
+    command: dragonfly --cluster_mode=emulated --lock_on_hashtags
+    # No host port — reachable only on the internal network.
+    volumes:
+      - dragonfly_data:/data
+    ulimits:
+      memlock: -1
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
   minio:
     image: minio/minio:${MINIO_IMAGE_TAG:-RELEASE.2025-04-22T22-12-26Z}
     container_name: quackback-minio
@@ -132,3 +150,4 @@ services:
 volumes:
   postgres_data:
   minio_data:
+  dragonfly_data:
